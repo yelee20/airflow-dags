@@ -1,34 +1,37 @@
-from functools import cached_property
 from typing import Optional
 from airflow.utils.context import Context
 
 from airflow.models import BaseOperator
 
 
+from typing import Any
+
+
 class AirbnbSourcingOperator(BaseOperator):
-    # template_fields = (
-    #     "bucket_name",
-    #     "mall_id",
-    #     "provider",
-    #     "data_category",
-    #     "batch_info",
-    #     "execution_date",
-    #     "data_id",
-    #     "ad_account_dict",
-    #     "api_key",
-    #     "secret_key",
-    #     "customer_id",
-    # )
-    from typing import Any
+    template_fields = (
+        "bucket_name",
+        "provider",
+        "data_category",
+        # "batch_info",
+        "execution_date"
+    )
 
     def __init__(
             self,
+            bucket_name: str,
+            provider: str,
+            data_category: str,
+            execution_date: str,
             **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.http_conn_id = "airbnb"
         self.check_in_date = "2022-10-21"
         self.check_out_date = "2022-10-22"
+        self.bucket_name = bucket_name
+        self.provider = provider
+        self.data_category = data_category
+        self.execution_date = execution_date
 
     @staticmethod
     def get_url(page: Optional[int], check_in_date: str, check_out_date: str) -> str:
@@ -95,11 +98,25 @@ class AirbnbSourcingOperator(BaseOperator):
 
                 if room_info not in room_infos:
                     room_infos.append(room_info)
-            print(len(room_infos))
-            result_objects = {"ResultObjects": room_infos}
 
-            return result_objects
+        result_objects = {"ResultObjects": room_infos}
+        return result_objects
 
-    def execute(self, context: Context) -> Any:
+    def upload_room_list_to_s3(self, json_data) -> None:
+        from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+        from utils.aws.s3 import upload_json_to_s3, get_sourcing_path
+        from constants.constants import AWS_S3_CONN_ID
+
+        sourcing_path = get_sourcing_path(provider=self.provider,
+                                          data_category=self.data_category,
+                                          execution_date=self.execution_date)
+        s3_hook = S3Hook(AWS_S3_CONN_ID)
+
+        upload_json_to_s3(s3_hook=s3_hook,
+                          bucket_name=self.bucket_name,
+                          data_key=f"{sourcing_path}.json",
+                          json_data=json_data)
+
+    def execute(self, context: Context) -> None:
         room_list = self.get_room_list()
-        print(room_list)
+        self.upload_room_list_to_s3(room_list)
