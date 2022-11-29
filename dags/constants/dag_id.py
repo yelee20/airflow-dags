@@ -1,6 +1,2 @@
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from typing import Final
-
-AIRBNB: "Final[str]" = "airbnb"
+AIRBNB: [str] = "airbnb"
+HK_PROPERTY: [str] = "hk_property"
