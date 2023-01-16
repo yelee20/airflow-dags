@@ -6,13 +6,12 @@ from constants.data_category import DataCategory
 from typing import Any
 
 
-class HKPropertySourcingOperator(BaseOperator):
+class MidLandRealitySourcingOperator(BaseOperator):
     template_fields = (
         "bucket_name",
         "provider",
-        # "batch_info",
-        "data_category"
-        "execution_date"
+        "data_category",
+        "execution_date",
     )
 
     def __init__(
@@ -28,7 +27,7 @@ class HKPropertySourcingOperator(BaseOperator):
         self.provider = provider
         self.execution_date = execution_date
         self.data_category = data_category
-        self.base_url = "https://www.hkp.com.hk/en/list/rent"
+        self.base_url = "https://www.midland.com.hk/en/list/rent"
 
     def get_chrome_driver(self):
         from selenium import webdriver
@@ -81,7 +80,7 @@ class HKPropertySourcingOperator(BaseOperator):
             time.sleep(1)
 
             self.log.info(f"last_page_height: {last_page_height}")
-
+            break
         return driver.page_source
 
     def get_html_source(self, driver):
@@ -99,22 +98,22 @@ class HKPropertySourcingOperator(BaseOperator):
         return soup
 
     @staticmethod
-    def get_sfa_gfa(space_info: List):
-        if len(space_info) < 2:
-            return None, None
-        elif len(space_info) < 7:
-            return space_info[1], None
+    def get_sfa_gfa(space: List):
+        if len(space) > 1:
+            sfa, gfa = space[0].get_text().replace("SFA", "").replace("ft²", "").replace("\xa0", ""), \
+                       space[1].get_text().replace("GFA", "").replace("ft²", "").replace("\xa0", "")
+            return sfa, gfa
         else:
-            return space_info[1], space_info[5]
+            return space[0].get_text().replace("SFA", "").replace("ft²", "").replace("\xa0", ""), None
 
     def get_property_info(self, soup):
-        import re
+        import pandas as pd
 
         rooms = []
-        rents = soup.find_all("div", class_="sc-u3x3v7-25 hBypJX")
+        rents = soup.find_all("div", class_="sc-1r1odlb-23 etCoIy")
 
         for rent in rents:
-            titles = rent.find("div", class_="sc-hs8n9o-1 iaNTuL").get_text()
+            titles = rent.find("div", class_="sc-wivooq-1 hCnCJl").get_text()
             title_list = titles.strip().split("\n")
             title = title_list[0].strip()
 
@@ -123,19 +122,17 @@ class HKPropertySourcingOperator(BaseOperator):
             else:
                 sub_title = title_list[2].strip()
 
-            space = rent.find("div", class_="sc-16di5lh-5 cxijRp").get_text().replace("ft²", "")
-            space_element = re.split(" |GFA|\\xa0", space)
-
-            sfa, price_per_sfa, gfa, price_per_gfa = self.get_sfa_gfa(space_element)
-            mon_price = rent.find("span", class_="sc-1fa9gj4-4 iPsFLJ").get_text()[1:]
-            location = rent.find("span", class_="sc-u3x3v7-11 iPCCQr").get_text()
-            features = rent.find_all("div", class_="sc-u3x3v7-18 gwyDpM")
+            space = rent.find_all("div", class_="sc-gqqyk9-1 kYfBEV")
+            space_element = self.get_sfa_gfa(space)
+            mon_price = rent.find("span", class_="sc-hlnw2x-6 kktEPG").get_text()[1:]
+            location = rent.find("span", class_="sc-1r1odlb-9 dHhWAt").get_text()
+            features = rent.find_all("div", class_="sc-1r1odlb-16 gopLNA")
             features_combined = ""
 
             for i in range(len(features) // 2):
-                features_combined += features[i].get_text() + "\\ "
+                features_combined += features[i].get_text() + "&&"
 
-            age = rent.find("div", class_="sc-1prre98-0 jNGTki")
+            age = rent.find("div", class_="sc-w2gv6f-0 eMkKmr")
 
             if age:
                 age = age.get_text()
@@ -145,22 +142,24 @@ class HKPropertySourcingOperator(BaseOperator):
             url = rent.find('a', href=True)['href']
             room_idx = url.split("-")[-1]
 
-            room_info = {"room_idx": room_idx, "title": title, "sub_title": sub_title,
-                         "sfa": sfa, "gfa": gfa, "mon_price": mon_price, "age": age, "location": location,
-                         "features_combined": features_combined, "url": url}
+            room_info = {"date": self.execution_date, "room_idx": room_idx, "title": title, "sub_title": sub_title,
+                         "sfa": space_element[0], "gfa": space_element[1], "mon_price": mon_price, "age": age,
+                         "location": location, "features_combined": features_combined, "url": url}
 
             if room_info not in rooms:
                 rooms.append(room_info)
 
-        result_objects = {"ResultObjects": rooms}
-        self.log.info("------- Property Info -------")
-        self.log.info(result_objects)
-        self.log.info(f"# of properties: {len(rooms)}")
-        return result_objects
+        result_df = pd.DataFrame(rooms)
+        result_csv = result_df.to_csv(index=False)
 
-    def upload_property_info_to_s3(self, json_data) -> None:
+        self.log.info("------- Property Info -------")
+        self.log.info(result_csv)
+        self.log.info(f"# of properties: {len(rooms)}")
+        return result_csv
+
+    def upload_property_info_to_s3(self, df_data) -> None:
         from airflow.providers.amazon.aws.hooks.s3 import S3Hook
-        from utils.aws.s3 import upload_json_to_s3, get_sourcing_path
+        from utils.aws.s3 import upload_bytes_to_s3, get_sourcing_path
         from constants.constants import AWS_S3_CONN_ID
 
         self.log.info("------- Uploading property info to AWS S3 -------")
@@ -169,11 +168,14 @@ class HKPropertySourcingOperator(BaseOperator):
                                           data_category=self.data_category,
                                           execution_date=self.execution_date)
         s3_hook = S3Hook(AWS_S3_CONN_ID)
+        data_bytes = df_data.encode()
 
-        upload_json_to_s3(s3_hook=s3_hook,
-                          bucket_name=self.bucket_name,
-                          data_key=f"{sourcing_path}.json",
-                          json_data=json_data)
+        upload_bytes_to_s3(
+            s3_hook=s3_hook,
+            bucket_name=self.bucket_name,
+            data_key=f"{sourcing_path}.csv",
+            bytes_data=data_bytes,
+        )
 
         self.log.info("------- PROPERTY INFO UPLOADED -------")
 
